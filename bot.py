@@ -2,6 +2,8 @@
 import logging
 import requests
 import json
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, WebAppInfo, KeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 from telegram.request import HTTPXRequest
@@ -9,6 +11,7 @@ from telegram.request import HTTPXRequest
 WEB_APP_URL = "https://ps2308.gt.tc"
 BOT_TOKEN = "8934688321:AAF22dYMMrQhWSU7fvmGOCt_Igs8bstVdRE"
 SITE_URL = "https://ps2308.gt.tc"
+PORT = 10000
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -16,6 +19,26 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# =============================================
+# HTTP-сервер для Render (чтобы не падал)
+# =============================================
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b"OK")
+    def log_message(self, format, *args):
+        pass  # Отключаем логи для здоровья
+
+def run_http_server():
+    server = HTTPServer(('0.0.0.0', PORT), HealthCheckHandler)
+    logger.info(f"🌐 HTTP-сервер запущен на порту {PORT} (для Render)")
+    server.serve_forever()
+
+# =============================================
+# Telegram-бот
+# =============================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info(f"🔥 ПОЛУЧЕНА КОМАНДА /start от {update.effective_user.id}")
     keyboard = ReplyKeyboardMarkup(
@@ -35,11 +58,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("✅ Ответ отправлен")
 
 async def handle_report(update: Update, context: ContextTypes.DEFAULT_TYPE, period: str) -> None:
-    """Обработчик запроса отчёта"""
     await update.message.reply_text(f"⏳ Формирую отчёт за {period}...")
     
     try:
-        # Запрашиваем данные с сайта
         url = f"{SITE_URL}/tabel_report_all.php?type={period}"
         logger.info(f"Запрос к {url}")
         
@@ -50,7 +71,6 @@ async def handle_report(update: Update, context: ContextTypes.DEFAULT_TYPE, peri
             await update.message.reply_text("❌ Нет данных за выбранный период")
             return
         
-        # Формируем текстовый отчёт
         report_text = f"📊 ОТЧЁТ ЗА {data.get('period', '').upper()}\n"
         report_text += "=" * 40 + "\n\n"
         
@@ -63,7 +83,6 @@ async def handle_report(update: Update, context: ContextTypes.DEFAULT_TYPE, peri
             report_text += f"👥 Сотрудников: {day.get('employeeCount', 0)}\n"
             report_text += f"⏱ Часов: {day.get('totalHours', 0)}\n\n"
             
-            # Список сотрудников
             for emp in day.get('employees', []):
                 report_text += f"  • {emp.get('name', '')}: {emp.get('hours', 0)} ч\n"
             report_text += "\n" + "-" * 30 + "\n\n"
@@ -72,14 +91,12 @@ async def handle_report(update: Update, context: ContextTypes.DEFAULT_TYPE, peri
         
         report_text += f"\n📊 ИТОГО: {total_hours} человеко-часов"
         
-        # Отправляем отчёт
         if len(report_text) > 4000:
             for i in range(0, len(report_text), 4000):
                 await update.message.reply_text(report_text[i:i+4000])
         else:
             await update.message.reply_text(report_text)
             
-        # Отправляем ссылку на полную версию в браузере
         await update.message.reply_text(
             f"📎 Полная версия с экспортом:\n{SITE_URL}/tabel.php\n\n"
             "Для экспорта в PDF/Excel откройте ссылку в браузере."
@@ -110,6 +127,11 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     logger.error(f"❌ ОШИБКА: {context.error}")
 
 def main() -> None:
+    # Запускаем HTTP-сервер в отдельном потоке
+    http_thread = threading.Thread(target=run_http_server, daemon=True)
+    http_thread.start()
+    
+    # Запускаем бота
     request = HTTPXRequest(
         connect_timeout=30,
         read_timeout=90,

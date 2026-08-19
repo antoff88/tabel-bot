@@ -4,6 +4,7 @@ import requests
 import json
 import threading
 import io
+import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, WebAppInfo, KeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
@@ -21,9 +22,9 @@ API_KEY = "ps2308_2026_secret_key"
 PORT = 10000
 
 # =============================================
-# 🔐 АДМИНИСТРАТОР (только этот пользователь может экспортировать PDF)
+# 🔐 АДМИНИСТРАТОР
 # =============================================
-ADMIN_ID = 6014139484  # Ваш Telegram ID
+ADMIN_ID = 6014139484
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -144,7 +145,20 @@ async def handle_report(update: Update, context: ContextTypes.DEFAULT_TYPE, peri
         url = f"{SITE_URL}/bot_api.php?key={API_KEY}&type={period}"
         logger.info(f"Запрос к {url}")
         
-        response = requests.get(url, timeout=30)
+        # Увеличиваем таймаут и добавляем заголовки
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (compatible; TelegramBot/1.0)',
+            'Accept': 'application/json',
+            'Connection': 'close'
+        }
+        
+        response = requests.get(url, timeout=60, headers=headers)
+        logger.info(f"Статус ответа: {response.status_code}")
+        
+        if response.status_code != 200:
+            await update.message.reply_text(f"❌ Ошибка: сервер вернул код {response.status_code}")
+            return
+            
         data = response.json()
         
         if data.get('error'):
@@ -164,6 +178,12 @@ async def handle_report(update: Update, context: ContextTypes.DEFAULT_TYPE, peri
             caption=f"📊 Отчёт за {period_label}"
         )
         
+    except requests.exceptions.Timeout:
+        logger.error("Таймаут при запросе к сайту")
+        await update.message.reply_text("❌ Ошибка: сайт не отвечает (таймаут). Попробуйте позже.")
+    except requests.exceptions.ConnectionError as e:
+        logger.error(f"Ошибка соединения: {e}")
+        await update.message.reply_text("❌ Ошибка: не удалось подключиться к сайту. Проверьте, что сайт доступен.")
     except Exception as e:
         logger.error(f"Ошибка при формировании отчёта: {e}")
         await update.message.reply_text(f"❌ Ошибка: {str(e)}")

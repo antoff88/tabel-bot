@@ -8,7 +8,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, WebAppInfo, KeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 from telegram.request import HTTPXRequest
-from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
@@ -17,7 +17,13 @@ from reportlab.lib.units import cm
 WEB_APP_URL = "https://ps2308.gt.tc"
 BOT_TOKEN = "8934688321:AAF22dYMMrQhWSU7fvmGOCt_Igs8bstVdRE"
 SITE_URL = "https://ps2308.gt.tc"
+API_KEY = "ps2308_2026_secret_key"
 PORT = 10000
+
+# =============================================
+# 🔐 АДМИНИСТРАТОР (только этот пользователь может экспортировать PDF)
+# =============================================
+ADMIN_ID = 6014139484  # Ваш Telegram ID
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -46,37 +52,19 @@ def run_http_server():
 # Генерация PDF
 # =============================================
 def generate_pdf_report(data, period_label):
-    """Создаёт PDF-файл с отчётом и возвращает bytes"""
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4, topMargin=1*cm, bottomMargin=1*cm)
     styles = getSampleStyleSheet()
     
-    # Стили
-    title_style = ParagraphStyle(
-        'TitleStyle',
-        parent=styles['Heading1'],
-        fontSize=16,
-        alignment=1,  # center
-        spaceAfter=12
-    )
-    subtitle_style = ParagraphStyle(
-        'SubtitleStyle',
-        parent=styles['Normal'],
-        fontSize=12,
-        alignment=1,
-        spaceAfter=12
-    )
+    title_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontSize=16, alignment=1, spaceAfter=12)
+    subtitle_style = ParagraphStyle('SubtitleStyle', parent=styles['Normal'], fontSize=12, alignment=1, spaceAfter=12)
     
     elements = []
-    
-    # Заголовок
     elements.append(Paragraph(f"📊 ОТЧЁТ ЗА {period_label.upper()}", title_style))
     elements.append(Spacer(1, 0.3*cm))
     
-    # Общая статистика
     total_hours = 0
     total_employees = set()
-    
     for day in data.get('days', []):
         total_hours += day.get('totalHours', 0)
         for emp in day.get('employees', []):
@@ -86,27 +74,16 @@ def generate_pdf_report(data, period_label):
     elements.append(Paragraph(f"Всего сотрудников: {len(total_employees)}", subtitle_style))
     elements.append(Spacer(1, 0.5*cm))
     
-    # По дням
     for day in data.get('days', []):
-        # Заголовок дня
-        day_style = ParagraphStyle(
-            'DayStyle',
-            parent=styles['Heading2'],
-            fontSize=13,
-            spaceAfter=6,
-            textColor=colors.darkblue
-        )
+        day_style = ParagraphStyle('DayStyle', parent=styles['Heading2'], fontSize=13, spaceAfter=6, textColor=colors.darkblue)
         elements.append(Paragraph(f"📅 {day.get('date', '')} — {day.get('location', '')}", day_style))
         elements.append(Paragraph(f"Ответственный: {day.get('responsible', '')}", styles['Normal']))
         elements.append(Paragraph(f"Место: {day.get('workPlace', '')}", styles['Normal']))
         elements.append(Spacer(1, 0.2*cm))
         
-        # Таблица сотрудников
         table_data = [['№', 'Сотрудник', 'Часы']]
         for i, emp in enumerate(day.get('employees', []), 1):
             table_data.append([str(i), emp.get('name', ''), str(emp.get('hours', 0))])
-        
-        # Итого за день
         table_data.append(['', 'ИТОГО за день:', str(day.get('totalHours', 0))])
         
         table = Table(table_data, colWidths=[1.5*cm, 10*cm, 3*cm])
@@ -124,19 +101,11 @@ def generate_pdf_report(data, period_label):
         elements.append(table)
         elements.append(Spacer(1, 0.5*cm))
     
-    # Итоговая статистика
     elements.append(Spacer(1, 0.5*cm))
     elements.append(Paragraph(f"📊 ИТОГО: {total_hours} человеко-часов", styles['Heading3']))
     
-    # Подвал
+    footer_style = ParagraphStyle('FooterStyle', parent=styles['Normal'], fontSize=8, alignment=1, textColor=colors.grey)
     elements.append(Spacer(1, 1*cm))
-    footer_style = ParagraphStyle(
-        'FooterStyle',
-        parent=styles['Normal'],
-        fontSize=8,
-        alignment=1,
-        textColor=colors.grey
-    )
     elements.append(Paragraph("Сформировано в системе «ПромСтрой Табель»", footer_style))
     
     doc.build(elements)
@@ -151,106 +120,70 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     keyboard = ReplyKeyboardMarkup(
         [
             [KeyboardButton("📊 Открыть табель", web_app=WebAppInfo(url=WEB_APP_URL))],
-            [KeyboardButton("📋 Отчёт за неделю (текст)")],
-            [KeyboardButton("📄 Отчёт за неделю (PDF)")],
-            [KeyboardButton("📋 Отчёт за сегодня (текст)")],
-            [KeyboardButton("📄 Отчёт за сегодня (PDF)")]
         ],
         resize_keyboard=True,
     )
     await update.message.reply_text(
         "👋 Система учёта табелей ООО «ПромСтрой»\n\n"
-        "Выберите действие:",
+        "Нажмите кнопку, чтобы открыть табель.",
         reply_markup=keyboard,
     )
-    logger.info("✅ Ответ отправлен")
 
-async def handle_report(update: Update, context: ContextTypes.DEFAULT_TYPE, period: str, format: str = "text") -> None:
-    """Обработчик запроса отчёта"""
-    period_labels = {
-        "week": "текущую неделю",
-        "all": "сегодня"
-    }
-    await update.message.reply_text(f"⏳ Формирую отчёт за {period_labels.get(period, period)}...")
+async def handle_report(update: Update, context: ContextTypes.DEFAULT_TYPE, period: str) -> None:
+    user_id = update.effective_user.id
+    logger.info(f"📨 Запрос отчёта от {user_id}")
+    
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("❌ Доступ запрещён. Только администратор может экспортировать PDF-отчёты.")
+        return
+    
+    period_labels = {"week": "текущую неделю", "all": "сегодня"}
+    await update.message.reply_text(f"⏳ Формирую PDF-отчёт за {period_labels.get(period, period)}...")
     
     try:
-        url = f"{SITE_URL}/tabel_report_all.php?type={period}"
+        url = f"{SITE_URL}/bot_api.php?key={API_KEY}&type={period}"
         logger.info(f"Запрос к {url}")
         
         response = requests.get(url, timeout=30)
         data = response.json()
         
+        if data.get('error'):
+            await update.message.reply_text(f"❌ Ошибка: {data['error']}")
+            return
+        
         if not data.get('days'):
             await update.message.reply_text("❌ Нет данных за выбранный период")
             return
         
-        if format == "pdf":
-            # Генерируем PDF
-            period_label = data.get('period', period)
-            pdf_bytes = generate_pdf_report(data, period_label)
-            
-            # Отправляем PDF файл
-            await update.message.reply_document(
-                document=io.BytesIO(pdf_bytes),
-                filename=f"otchet_{period}_{data.get('days', [{}])[0].get('date', 'today')}.pdf",
-                caption=f"📊 Отчёт за {period_label}"
-            )
-        else:
-            # Текстовый отчёт (как раньше)
-            report_text = f"📊 ОТЧЁТ ЗА {data.get('period', '').upper()}\n"
-            report_text += "=" * 40 + "\n\n"
-            
-            total_hours = 0
-            
-            for day in data.get('days', []):
-                report_text += f"📅 {day.get('date', '')}\n"
-                report_text += f"📍 {day.get('location', '')}\n"
-                report_text += f"👤 Ответственный: {day.get('responsible', '')}\n"
-                report_text += f"👥 Сотрудников: {day.get('employeeCount', 0)}\n"
-                report_text += f"⏱ Часов: {day.get('totalHours', 0)}\n\n"
-                
-                for emp in day.get('employees', []):
-                    report_text += f"  • {emp.get('name', '')}: {emp.get('hours', 0)} ч\n"
-                report_text += "\n" + "-" * 30 + "\n\n"
-                
-                total_hours += day.get('totalHours', 0)
-            
-            report_text += f"\n📊 ИТОГО: {total_hours} человеко-часов"
-            
-            if len(report_text) > 4000:
-                for i in range(0, len(report_text), 4000):
-                    await update.message.reply_text(report_text[i:i+4000])
-            else:
-                await update.message.reply_text(report_text)
-            
+        period_label = data.get('period', period)
+        pdf_bytes = generate_pdf_report(data, period_label)
+        
+        await update.message.reply_document(
+            document=io.BytesIO(pdf_bytes),
+            filename=f"otchet_{period}_{data.get('days', [{}])[0].get('date', 'today')}.pdf",
+            caption=f"📊 Отчёт за {period_label}"
+        )
+        
     except Exception as e:
         logger.error(f"Ошибка при формировании отчёта: {e}")
         await update.message.reply_text(f"❌ Ошибка: {str(e)}")
 
-async def handle_week_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await handle_report(update, context, "week", "text")
-
 async def handle_week_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await handle_report(update, context, "week", "pdf")
-
-async def handle_today_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await handle_report(update, context, "all", "text")
+    await handle_report(update, context, "week")
 
 async def handle_today_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await handle_report(update, context, "all", "pdf")
+    await handle_report(update, context, "all")
 
 async def handle_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = update.message.text
-    logger.info(f"📨 Сообщение от {update.effective_user.id}: {text}")
-    
-    if "PDF" in text and "неделя" in text:
+    if "неделя" in text.lower():
         await handle_week_pdf(update, context)
-    elif "PDF" in text and "сегодня" in text:
+    elif "сегодня" in text.lower():
         await handle_today_pdf(update, context)
-    elif "текст" in text and "неделя" in text:
-        await handle_week_text(update, context)
-    elif "текст" in text and "сегодня" in text:
-        await handle_today_text(update, context)
+    elif "/week" in text:
+        await handle_week_pdf(update, context)
+    elif "/today" in text:
+        await handle_today_pdf(update, context)
     else:
         await update.message.reply_text(f"Получил: {text}")
 
@@ -258,23 +191,14 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     logger.error(f"❌ ОШИБКА: {context.error}")
 
 def main() -> None:
-    # Запускаем HTTP-сервер
     http_thread = threading.Thread(target=run_http_server, daemon=True)
     http_thread.start()
     
-    # Запускаем бота
-    request = HTTPXRequest(
-        connect_timeout=30,
-        read_timeout=90,
-        write_timeout=30,
-        pool_timeout=30
-    )
+    request = HTTPXRequest(connect_timeout=30, read_timeout=90, write_timeout=30, pool_timeout=30)
     app = Application.builder().token(BOT_TOKEN).request(request).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("week", handle_week_text))
-    app.add_handler(CommandHandler("weekpdf", handle_week_pdf))
-    app.add_handler(CommandHandler("today", handle_today_text))
-    app.add_handler(CommandHandler("todaypdf", handle_today_pdf))
+    app.add_handler(CommandHandler("week", handle_week_pdf))
+    app.add_handler(CommandHandler("today", handle_today_pdf))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_any_message))
     app.add_error_handler(error_handler)
     logger.info("🚀 Бот запущен")

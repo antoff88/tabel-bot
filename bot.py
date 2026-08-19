@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
+import asyncio
 import logging
 import requests
 import json
 import threading
 import io
-import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
 from telegram import Update, WebAppInfo, KeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 from telegram.request import HTTPXRequest
@@ -20,38 +21,64 @@ BOT_TOKEN = "8934688321:AAF22dYMMrQhWSU7fvmGOCt_Igs8bstVdRE"
 SITE_URL = "https://ps2308.gt.tc"
 API_KEY = "ps2308_2026_secret_key"
 PORT = 10000
-
-# =============================================
-# 🔐 АДМИНИСТРАТОР
-# =============================================
 ADMIN_ID = 6014139484
 
-logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
+logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# =============================================
-# HTTP-сервер для Render
-# =============================================
-class HealthCheckHandler(BaseHTTPRequestHandler):
+class RenderRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200)
+        parsed = urlparse(self.path)
+        path = parsed.path
+        query = parse_qs(parsed.query)
+        
+        if path == '/health':
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b"OK")
+            return
+        
+        if path == '/api/report':
+            key = query.get('key', [''])[0]
+            period = query.get('type', ['week'])[0]
+            
+            if key != API_KEY:
+                self.send_response(403)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': 'Неверный ключ API'}).encode())
+                return
+            
+            try:
+                url = f"{SITE_URL}/bot_api.php?key={API_KEY}&type={period}"
+                logger.info(f"API запрос к {url}")
+                response = requests.get(url, timeout=30, headers={'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'})
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(response.content)
+            except Exception as e:
+                logger.error(f"API ошибка: {e}")
+                self.send_response(500)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': str(e)}).encode())
+            return
+        
+        self.send_response(404)
         self.send_header('Content-type', 'text/plain')
         self.end_headers()
-        self.wfile.write(b"OK")
+        self.wfile.write(b"Not Found")
+    
     def log_message(self, format, *args):
         pass
 
 def run_http_server():
-    server = HTTPServer(('0.0.0.0', PORT), HealthCheckHandler)
+    server = HTTPServer(('0.0.0.0', PORT), RenderRequestHandler)
     logger.info(f"🌐 HTTP-сервер запущен на порту {PORT}")
     server.serve_forever()
 
-# =============================================
-# Генерация PDF
-# =============================================
 def generate_pdf_report(data, period_label):
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4, topMargin=1*cm, bottomMargin=1*cm)
@@ -60,9 +87,7 @@ def generate_pdf_report(data, period_label):
     title_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontSize=16, alignment=1, spaceAfter=12)
     subtitle_style = ParagraphStyle('SubtitleStyle', parent=styles['Normal'], fontSize=12, alignment=1, spaceAfter=12)
     
-    elements = []
-    elements.append(Paragraph(f"📊 ОТЧЁТ ЗА {period_label.upper()}", title_style))
-    elements.append(Spacer(1, 0.3*cm))
+    elements = [Paragraph(f"📊 ОТЧЁТ ЗА {period_label.upper()}", title_style), Spacer(1, 0.3*cm)]
     
     total_hours = 0
     total_employees = set()
@@ -113,27 +138,13 @@ def generate_pdf_report(data, period_label):
     buffer.seek(0)
     return buffer.getvalue()
 
-# =============================================
-# Обработчики команд
-# =============================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info(f"🔥 ПОЛУЧЕНА КОМАНДА /start от {update.effective_user.id}")
-    keyboard = ReplyKeyboardMarkup(
-        [
-            [KeyboardButton("📊 Открыть табель", web_app=WebAppInfo(url=WEB_APP_URL))],
-        ],
-        resize_keyboard=True,
-    )
-    await update.message.reply_text(
-        "👋 Система учёта табелей ООО «ПромСтрой»\n\n"
-        "Нажмите кнопку, чтобы открыть табель.",
-        reply_markup=keyboard,
-    )
+    keyboard = ReplyKeyboardMarkup([[KeyboardButton("📊 Открыть табель", web_app=WebAppInfo(url=WEB_APP_URL))]], resize_keyboard=True)
+    await update.message.reply_text("👋 Система учёта табелей ООО «ПромСтрой»\n\nНажмите кнопку, чтобы открыть табель.", reply_markup=keyboard)
 
 async def handle_report(update: Update, context: ContextTypes.DEFAULT_TYPE, period: str) -> None:
     user_id = update.effective_user.id
-    logger.info(f"📨 Запрос отчёта от {user_id}")
-    
     if user_id != ADMIN_ID:
         await update.message.reply_text("❌ Доступ запрещён. Только администратор может экспортировать PDF-отчёты.")
         return
@@ -142,23 +153,10 @@ async def handle_report(update: Update, context: ContextTypes.DEFAULT_TYPE, peri
     await update.message.reply_text(f"⏳ Формирую PDF-отчёт за {period_labels.get(period, period)}...")
     
     try:
-        url = f"{SITE_URL}/bot_api.php?key={API_KEY}&type={period}"
-        logger.info(f"Запрос к {url}")
+        url = f"http://localhost:{PORT}/api/report?key={API_KEY}&type={period}"
+        logger.info(f"Запрос к внутреннему API: {url}")
         
-        # Увеличиваем таймаут и добавляем заголовки
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (compatible; TelegramBot/1.0)',
-            'Accept': 'application/json',
-            'Connection': 'close'
-        }
-        
-        response = requests.get(url, timeout=60, headers=headers)
-        logger.info(f"Статус ответа: {response.status_code}")
-        
-        if response.status_code != 200:
-            await update.message.reply_text(f"❌ Ошибка: сервер вернул код {response.status_code}")
-            return
-            
+        response = requests.get(url, timeout=30)
         data = response.json()
         
         if data.get('error'):
@@ -177,15 +175,8 @@ async def handle_report(update: Update, context: ContextTypes.DEFAULT_TYPE, peri
             filename=f"otchet_{period}_{data.get('days', [{}])[0].get('date', 'today')}.pdf",
             caption=f"📊 Отчёт за {period_label}"
         )
-        
-    except requests.exceptions.Timeout:
-        logger.error("Таймаут при запросе к сайту")
-        await update.message.reply_text("❌ Ошибка: сайт не отвечает (таймаут). Попробуйте позже.")
-    except requests.exceptions.ConnectionError as e:
-        logger.error(f"Ошибка соединения: {e}")
-        await update.message.reply_text("❌ Ошибка: не удалось подключиться к сайту. Проверьте, что сайт доступен.")
     except Exception as e:
-        logger.error(f"Ошибка при формировании отчёта: {e}")
+        logger.error(f"Ошибка: {e}")
         await update.message.reply_text(f"❌ Ошибка: {str(e)}")
 
 async def handle_week_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -200,10 +191,6 @@ async def handle_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await handle_week_pdf(update, context)
     elif "сегодня" in text.lower():
         await handle_today_pdf(update, context)
-    elif "/week" in text:
-        await handle_week_pdf(update, context)
-    elif "/today" in text:
-        await handle_today_pdf(update, context)
     else:
         await update.message.reply_text(f"Получил: {text}")
 
@@ -211,11 +198,8 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     logger.error(f"❌ ОШИБКА: {context.error}")
 
 def main() -> None:
-    http_thread = threading.Thread(target=run_http_server, daemon=True)
-    http_thread.start()
-    
-    request = HTTPXRequest(connect_timeout=30, read_timeout=90, write_timeout=30, pool_timeout=30)
-    app = Application.builder().token(BOT_TOKEN).request(request).build()
+    threading.Thread(target=run_http_server, daemon=True).start()
+    app = Application.builder().token(BOT_TOKEN).request(HTTPXRequest(connect_timeout=30, read_timeout=90)).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("week", handle_week_pdf))
     app.add_handler(CommandHandler("today", handle_today_pdf))

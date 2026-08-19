@@ -4,8 +4,7 @@ from telegram import Update, WebAppInfo, KeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 from telegram.request import HTTPXRequest
 
-# TODO: Замени на актуальный URL из ngrok (см. инструкцию ниже)
-WEB_APP_URL = "https://excluding-stool-unstopped.ngrok-free.dev"
+WEB_APP_URL = "https://ps2308.gt.tc"
 BOT_TOKEN = "8934688321:AAF22dYMMrQhWSU7fvmGOCt_Igs8bstVdRE"
 
 logging.basicConfig(
@@ -15,7 +14,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.info(f"🔥 ПОЛУЧЕНА КОМАНДА /start от {update.effective_user.id} ({update.effective_user.username})")
+    logger.info(f"🔥 ПОЛУЧЕНА КОМАНДА /start от {update.effective_user.id}")
     keyboard = ReplyKeyboardMarkup(
         [[KeyboardButton("📊 Открыть табель", web_app=WebAppInfo(url=WEB_APP_URL))]],
         resize_keyboard=True,
@@ -35,9 +34,8 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     logger.error(f"❌ ОШИБКА: {context.error}")
 
 def main() -> None:
-    # Увеличенные таймауты для long-polling
+    # Убираем proxy — на Render он не нужен
     request = HTTPXRequest(
-        proxy="socks5h://127.0.0.1:10808",
         connect_timeout=30,
         read_timeout=90,
         write_timeout=30,
